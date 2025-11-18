@@ -10,7 +10,8 @@ const HEADLESS = process.argv[4] !== 'false';
 const SEARCH_BOX = 'textarea[name="q"]';
 const THUMBNAIL_SELECTOR = 'div.q1MG4e.mNsIhb img';
 const PREVIEW_SELECTOR = 'img[jsname="kn3ccd"]';
-const LIMIT = Number(process.argv[5] ?? '0'); 
+const LIMIT = Number(process.argv[5] ?? '0');
+const PREVIEW_TIMEOUT = Number(process.argv[6] ?? '20000');
 async function acceptConsent(page: Page) {
   const consentButton =
     (await page.$('button:has-text("I agree")')) ??
@@ -33,7 +34,7 @@ async function waitForPreviewUrl(page: Page, previousUrl?: string) {
       return httpImage?.src ?? null;
     },
     { selector: PREVIEW_SELECTOR, prev: previousUrl ?? null },
-    { timeout: 20000 }
+    { timeout: PREVIEW_TIMEOUT }
   );
   const url = (await handle.jsonValue()) as string | null;
   if (!url) {
@@ -100,30 +101,43 @@ async function run() {
         // element might already be visible; ignore errors
       }
 
-      await thumb.click({ delay: 50 });
-      const imageUrl = await waitForPreviewUrl(page, previousUrl);
-      previousUrl = imageUrl;
+      try {
+        await thumb.click({ delay: 50 });
+        const imageUrl = await waitForPreviewUrl(page, previousUrl);
+        previousUrl = imageUrl;
 
-      if (seen.has(imageUrl)) {
-        console.log(`Skipping duplicate image ${imageUrl}`);
-        continue;
+        if (seen.has(imageUrl)) {
+          console.log(`Skipping duplicate image ${imageUrl}`);
+          continue;
+        }
+        seen.add(imageUrl);
+
+        const response = await page.request.get(imageUrl);
+        if (!response.ok()) {
+          console.warn(`Failed to fetch ${imageUrl}: ${response.status()}`);
+          continue;
+        }
+
+        const buffer = await response.body();
+        const extension = pickExtension(imageUrl);
+        const suffix = safeSuffix(seen.size);
+        const filePath = path.join(
+          OUTPUT_DIR,
+          `${safeName}_${suffix}.${extension}`
+        );
+        await fs.writeFile(filePath, buffer);
+        console.log(`Saved image ${seen.size}: ${filePath}`);
+
+        await page.waitForTimeout(500);
+      } catch (error) {
+        if (error instanceof Error && error.name === 'TimeoutError') {
+          console.warn(
+            `Timed out waiting for preview on thumbnail ${index + 1}, skipping`
+          );
+          continue;
+        }
+        throw error;
       }
-      seen.add(imageUrl);
-
-      const response = await page.request.get(imageUrl);
-      if (!response.ok()) {
-        console.warn(`Failed to fetch ${imageUrl}: ${response.status()}`);
-        continue;
-      }
-
-      const buffer = await response.body();
-      const extension = pickExtension(imageUrl);
-      const suffix = safeSuffix(seen.size);
-      const filePath = path.join(OUTPUT_DIR, `${safeName}_${suffix}.${extension}`);
-      await fs.writeFile(filePath, buffer);
-      console.log(`Saved image ${seen.size}: ${filePath}`);
-
-      await page.waitForTimeout(500);
     }
   } finally {
     await browser.close();
